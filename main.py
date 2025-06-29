@@ -22,117 +22,122 @@ Created by Farrel Ega N R
 def load_wordlist(wordlist_path):
     try:
         with open(wordlist_path, 'r') as file:
-            words = file.read().splitlines()
-        return words
-    except FileNotFoundError:
-        print(f"[-] Error: File '{wordlist_path}' not found.")
-        exit(1)
+            return [line.strip() for line in file if line.strip()]
     except Exception as e:
-        print(f"[-] Error reading wordlist: {e}")
+        print(f"[-] Error loading wordlist: {e}")
         exit(1)
 
-def check_subdomain(subdomain, domain, protocol, timeout, results):
-    url = f"{protocol}://{subdomain}.{domain}"
-    try:
-        response = requests.get(url, timeout=timeout)
-        if response.status_code < 400:
-            print(f"[+] Found: {url} (Status: {response.status_code})")
-            results.append(url)
-    except requests.ConnectionError:
-        pass
-    except requests.RequestException as e:
-        pass
-    except Exception as e:
-        print(f"[-] Error checking {url}: {e}")
-
-def enumerate_subdomains(domain, wordlist_path, protocol="http", threads=10, timeout=5):
-    start_time = time.time()
-    wordlist = load_wordlist(wordlist_path)
-    
-    print(f"\n[+] Starting subdomain enumeration for: {domain}")
-    print(f"[+] Using wordlist: {wordlist_path}")
-    print(f"[+] Protocol: {protocol}")
-    print(f"[+] Threads: {threads}")
-    print(f"[+] Timeout: {timeout} seconds\n")
-    
+def scan_target(target, protocol, timeout, wordlist=None, scan_type="subdomain"):
     results = []
-    
-    with ThreadPoolExecutor(max_workers=threads) as executor:
-        for word in wordlist:
-            executor.submit(check_subdomain, word, domain, protocol, timeout, results)
-    
-    return results, start_time
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'
+    }
 
-def save_results(results, domain):
-    if not results:
-        return
+    def check_url(url):
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+                allow_redirects=True,
+                verify=False
+            )
+            
+            # Special handling for JuiceShop
+            if "OWASP Juice Shop" in response.text:
+                return url, f"JuiceShop Detected (Status: {response.status_code})"
+            
+            if response.status_code < 400:
+                return url, f"Active (Status: {response.status_code})"
+                
+        except requests.exceptions.SSLError:
+            return url, "SSL Error - Try with http"
+        except requests.exceptions.RequestException as e:
+            return url, f"Error: {type(e).__name__}"
+        except Exception as e:
+            return url, f"Unexpected Error: {str(e)}"
+        return None
+
+    start_time = time.time()
     
-    output_dir = "results"
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    if scan_type == "subdomain":
+        print(f"\n[+] Scanning subdomains for: {target}")
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = []
+            for word in wordlist:
+                url = f"{protocol}://{word}.{target}"
+                futures.append(executor.submit(check_url, url))
+            
+            for future in futures:
+                result = future.result()
+                if result:
+                    url, message = result
+                    print(f"[+] Found: {url} - {message}")
+                    results.append(url)
     
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    filename = f"{output_dir}/{domain}_subdomains_{timestamp}.txt"
+    elif scan_type == "path":
+        print(f"\n[+] Scanning paths for: {protocol}://{target}")
+        paths = [
+            "/", "/#/", "/#/login", "/#/search", 
+            "/api", "/admin", "/rest", "/graphql"
+        ]
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = []
+            for path in paths:
+                url = f"{protocol}://{target}{path}"
+                futures.append(executor.submit(check_url, url))
+            
+            for future in futures:
+                result = future.result()
+                if result:
+                    url, message = result
+                    print(f"[+] Found: {url} - {message}")
+                    results.append(url)
     
-    with open(filename, 'w') as file:
-        for result in results:
-            file.write(result + "\n")
-    
-    print(f"\n[+] Results saved to: {filename}")
+    elapsed_time = time.time() - start_time
+    print(f"\n[+] Scan completed in {elapsed_time:.2f} seconds")
+    return results
 
 def main():
-    parser = argparse.ArgumentParser(description="PySubEnum - Python Subdomain Enumerator")
-    parser.add_argument("-d", "--domain", help="Target domain (e.g., example.com)")
-    parser.add_argument("-w", "--wordlist", help="Path to wordlist file")
-    parser.add_argument("-p", "--protocol", choices=["http", "https"], default="http", 
-                       help="Protocol to use (http/https)")
-    parser.add_argument("-t", "--threads", type=int, default=10, 
-                       help="Number of threads to use (default: 10)")
-    parser.add_argument("-to", "--timeout", type=int, default=5, 
-                       help="Timeout in seconds for each request (default: 5)")
+    parser = argparse.ArgumentParser(description="Undircover - Advanced Web Scanner")
+    parser.add_argument("-t", "--target", help="Target domain or URL (e.g., example.com or juice-shop.herokuapp.com)")
+    parser.add_argument("-w", "--wordlist", help="Path to wordlist file (for subdomain scanning)")
+    parser.add_argument("-p", "--protocol", choices=["http", "https"], default="https", help="Protocol to use")
+    parser.add_argument("-to", "--timeout", type=int, default=15, help="Timeout in seconds")
+    parser.add_argument("-m", "--mode", choices=["subdomain", "path"], default="subdomain", help="Scanning mode")
     
     args = parser.parse_args()
     
-    if not args.domain or not args.wordlist:
-        banner()
-        parser.print_help()
-        print("\nExample usage:")
-        print("  python pysubenum.py -d example.com -w wordlist.txt")
-        print("  python pysubenum.py -d example.com -w wordlist.txt -p https -t 20 -to 3")
-        exit(1)
-    
     banner()
     
+    if not args.target:
+        parser.print_help()
+        print("\nExamples:")
+        print("  Subdomain scan: python undircover.py -t example.com -w wordlist.txt")
+        print("  Path scan: python undircover.py -t juice-shop.herokuapp.com -m path")
+        exit(1)
+
     try:
-        results, start_time = enumerate_subdomains(
-            args.domain, 
-            args.wordlist, 
-            args.protocol, 
-            args.threads, 
-            args.timeout
+        if args.mode == "subdomain" and not args.wordlist:
+            print("[-] Wordlist required for subdomain scanning")
+            exit(1)
+        
+        wordlist = load_wordlist(args.wordlist) if args.wordlist else None
+        results = scan_target(
+            target=args.target,
+            protocol=args.protocol,
+            timeout=args.timeout,
+            wordlist=wordlist,
+            scan_type=args.mode
         )
         
-        elapsed_time = time.time() - start_time
+        if not results:
+            print("[-] No active targets found")
         
-        print("\n[+] Enumeration completed!")
-        print(f"[+] Total subdomains found: {len(results)}")
-        print(f"[+] Time elapsed: {elapsed_time:.2f} seconds")
-        
-        if results:
-            print("\n[+] Found subdomains:")
-            for result in results:
-                print(f"  - {result}")
-            
-            save_results(results, args.domain)
-        else:
-            print("[-] No subdomains found.")
-            
     except KeyboardInterrupt:
-        print("\n[-] Scan interrupted by user.")
-        exit(0)
+        print("\n[-] Scan interrupted by user")
     except Exception as e:
-        print(f"[-] An error occurred: {e}")
-        exit(1)
+        print(f"[-] Critical error: {e}")
 
 if __name__ == "__main__":
     main()
